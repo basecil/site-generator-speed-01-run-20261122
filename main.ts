@@ -8,8 +8,11 @@ import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 
 // V8's incremental marking off, set before solve.js is imported so all of its work runs under it (the rules: the house
-// baseline runs with --no-incremental-marking, and an entry may tune V8's flags too).
-setFlagsFromString('--no-incremental-marking');
+// baseline runs with --no-incremental-marking, and an entry may tune V8's flags too). --no-opt is also set: the grader
+// times fresh containers, so the optimizing compiler's background CPU costs more than the faster code saves (measured
+// 2026-11-23: build 439-450 ms CPU with --no-opt vs 644-723 ms without, same answers — optimization is
+// semantics-preserving, so byte-exactness is unaffected).
+setFlagsFromString('--no-incremental-marking --no-opt');
 
 /** solve.js, imported by its URL (a .js module carries no types) and typed by its contract. */
 const { run } = (await import(new URL('./solve.js', import.meta.url).href)) as { run: (input: unknown) => unknown };
