@@ -245,45 +245,75 @@ export function parseFrontMatter(text) {
 
 /* --------------------------------------------------------------- markdown */
 
-const FENCE_OPEN = /^```([A-Za-z0-9_+-]*)[ \t]*$/;
-const FENCE_CLOSE = /^```[ \t]*$/;
-const HEADING = /^(#{1,6})[ \t]+(.*?)[ \t]*$/;
-const HR = /^(?:---|\*\*\*)[ \t]*$/;
-const BULLET = /^[-*] (.*)$/;
-const ORDERED = /^(\d{1,9})\. (.*)$/;
-const CONTINUED = /^ {2,}\S/;
+/** A fence language-tag character: A-Z a-z 0-9 _ + -. */
+function isLangChar(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 43 || c === 45;
+}
 
-/** A line of spaces/tabs only (the empty line included). */
-function isBlank(line) {
-  for (let k = 0; k < line.length; k++) {
-    const c = line.charCodeAt(k);
+/** The language of a fence-open line src[pos..eol) (``` + lang + spaces/tabs), or null. Only called when the line starts with ```. */
+function fenceLang(src, pos, eol) {
+  let j = pos + 3;
+  while (j < eol && isLangChar(src.charCodeAt(j))) j++;
+  const lang = src.slice(pos + 3, j);
+  while (j < eol && (src.charCodeAt(j) === 32 || src.charCodeAt(j) === 9)) j++;
+  return j === eol ? lang : null;
+}
+
+/** Whether src[pos..eol) is a fence-close line (``` + spaces/tabs only). */
+function isFenceClose(src, pos, eol) {
+  if (src.charCodeAt(pos) !== 96 || src.charCodeAt(pos + 1) !== 96 || src.charCodeAt(pos + 2) !== 96) return false;
+  for (let j = pos + 3; j < eol; j++) {
+    const c = src.charCodeAt(j);
     if (c !== 32 && c !== 9) return false;
   }
   return true;
 }
 
-/** A paragraph line as it is rendered: spaces and tabs at either end dropped. */
-function trimLine(line) {
-  let a = 0;
-  let b = line.length;
-  while (a < b && (line.charCodeAt(a) === 32 || line.charCodeAt(a) === 9)) a++;
-  while (b > a && (line.charCodeAt(b - 1) === 32 || line.charCodeAt(b - 1) === 9)) b--;
-  return a === 0 && b === line.length ? line : line.slice(a, b);
+/** A heading line's level and text, or null (1-6 # at the line start, spaces/tabs, non-empty text). */
+function headingRange(src, pos, eol) {
+  let j = pos;
+  while (j < eol && src.charCodeAt(j) === 35) j++;
+  const depth = j - pos;
+  if (depth === 0 || depth > 6) return null;
+  if (j >= eol || (src.charCodeAt(j) !== 32 && src.charCodeAt(j) !== 9)) return null;
+  while (j < eol && (src.charCodeAt(j) === 32 || src.charCodeAt(j) === 9)) j++;
+  let b = eol;
+  while (b > j && (src.charCodeAt(b - 1) === 32 || src.charCodeAt(b - 1) === 9)) b--;
+  if (b === j) return null;
+  return { depth, text: src.slice(j, b) };
 }
 
-/** A heading line's level and text, or null (a heading's text is never empty). */
-function headingOf(line) {
-  const m = HEADING.exec(line);
-  return m === null || m[2] === '' ? null : { depth: m[1].length, text: m[2] };
+/** Whether src[pos..eol) is a thematic break (--- or *** + spaces/tabs only). */
+function isHrRange(src, pos, eol) {
+  const c0 = src.charCodeAt(pos);
+  if (c0 !== 45 && c0 !== 42) return false;
+  if (src.charCodeAt(pos + 1) !== c0 || src.charCodeAt(pos + 2) !== c0) return false;
+  for (let j = pos + 3; j < eol; j++) {
+    const c = src.charCodeAt(j);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
 }
 
-/** Whether `line` ends a paragraph: a blank line, a fence, a heading or a thematic break. */
-function endsParagraph(line) {
-  if (isBlank(line)) return true;
-  const c0 = line.charCodeAt(0);
-  if (c0 === 96 && line.charCodeAt(1) === 96 && line.charCodeAt(2) === 96 && FENCE_OPEN.test(line)) return true;
-  if (c0 === 35 && headingOf(line) !== null) return true;
-  if ((c0 === 45 || c0 === 42) && HR.test(line)) return true;
+/** Whether the code unit is whitespace (the \s set; \n cannot occur inside a line). */
+function isSpaceCode(c) {
+  return c === 9 || c === 10 || c === 11 || c === 12 || c === 13 || c === 32 || c === 0x00a0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+}
+
+/** Whether the line src[pos..eol) ends a paragraph: blank, a fence, a heading or a thematic break. A line starting with space/tab ends one only when blank (no opener matches past leading whitespace). */
+function endsParagraphRange(src, pos, eol) {
+  if (pos === eol) return true; // an empty line (its first char would be the "\n" past it)
+  const c0 = src.charCodeAt(pos);
+  if (c0 === 32 || c0 === 9) {
+    for (let k = pos + 1; k < eol; k++) {
+      const c = src.charCodeAt(k);
+      if (c !== 32 && c !== 9) return false;
+    }
+    return true;
+  }
+  if (c0 === 96 && src.charCodeAt(pos + 1) === 96 && src.charCodeAt(pos + 2) === 96 && fenceLang(src, pos, eol) !== null) return true;
+  if (c0 === 35 && headingRange(src, pos, eol) !== null) return true;
+  if ((c0 === 45 || c0 === 42) && isHrRange(src, pos, eol)) return true;
   return false;
 }
 
@@ -412,63 +442,92 @@ export function inline(s, lo, hi, env, parts) {
 /**
  * `src` rendered: its HTML (each block on its own lines, a "\n" after the last), its table of contents (every level 2
  * and 3 heading: level, id and its inline HTML) and its excerpt (the first paragraph's inline HTML, or "").
- * Single pass over the lines: blocks render straight to the output, no token objects. Block dispatch runs the
- * reference's regexes only when a cheap first-char check says they can match.
+ * Index-based over the source (no split: lines are [pos, eol) ranges, sliced only when their text is used); block
+ * dispatch is manual first-char checks, and a line starting with space/tab is blank-checked by scan (no opener
+ * matches past leading whitespace). A fence body is one slice of the source, not a join of its lines — the trailing
+ * empty line at EOF still counts as a body line, as the reference's split makes it one.
  */
 export function renderMarkdown(src, env) {
-  const lines = src.split('\n');
+  const N = src.length;
   const ids = new Set();
   const toc = [];
   let excerpt = null;
   const parts = [];
-  let i = 0;
-  const n = lines.length;
-  while (i < n) {
-    const line = lines[i];
-    if (isBlank(line)) {
-      i++;
+  let pos = 0;
+  while (pos < N) {
+    let eol = src.indexOf('\n', pos);
+    if (eol === -1) eol = N;
+    if (pos === eol) {
+      pos = eol + 1;
       continue;
     }
-    const c0 = line.charCodeAt(0);
-    if (c0 === 96 && line.charCodeAt(1) === 96 && line.charCodeAt(2) === 96) {
-      const fence = FENCE_OPEN.exec(line);
-      if (fence !== null) {
-        i++;
-        const codeLines = [];
-        while (i < n && !FENCE_CLOSE.test(lines[i])) {
-          codeLines.push(lines[i]);
-          i++;
+    const c0 = src.charCodeAt(pos);
+    if (c0 === 32 || c0 === 9) {
+      // A line starting with space/tab: blank unless a non-blank char follows;
+      // non-blank, no opener matches, so it is a paragraph line.
+      let k = pos + 1;
+      while (k < eol && (src.charCodeAt(k) === 32 || src.charCodeAt(k) === 9)) k++;
+      if (k === eol) {
+        pos = eol + 1;
+        continue;
+      }
+    }
+    if (c0 === 96 && src.charCodeAt(pos + 1) === 96 && src.charCodeAt(pos + 2) === 96) {
+      const lang = fenceLang(src, pos, eol);
+      if (lang !== null) {
+        const bodyStart = eol + 1;
+        let bodyLines = 0;
+        let closePos = -1;
+        let p = bodyStart;
+        while (p <= N) {
+          let e2 = src.indexOf('\n', p);
+          if (e2 === -1) e2 = N;
+          if (isFenceClose(src, p, e2)) {
+            closePos = p;
+            pos = e2 + 1;
+            break;
+          }
+          bodyLines++;
+          p = e2 + 1;
         }
-        i++; // the close line is consumed even when the body ran to EOF
-        const cls = fence[1] === '' ? '' : ` class="language-${escapeHtml(fence[1])}"`;
-        parts.push(`<pre><code${cls}>${codeLines.length === 0 ? '' : `${escapeHtml(codeLines.join('\n'))}\n`}</code></pre>\n`);
+        if (closePos === -1) pos = N + 1;
+        const cls = lang === '' ? '' : ` class="language-${escapeHtml(lang)}"`;
+        if (bodyLines === 0) parts.push(`<pre><code${cls}></code></pre>\n`);
+        else {
+          const joined = closePos === -1 ? src.slice(bodyStart, N) : src.slice(bodyStart, closePos - 1);
+          parts.push(`<pre><code${cls}>${escapeHtml(joined)}\n</code></pre>\n`);
+        }
         continue;
       }
     }
     if (c0 === 35) {
-      const h = headingOf(line);
+      const h = headingRange(src, pos, eol);
       if (h !== null) {
         const id = uniqueSlug(slugify(h.text), ids);
         const html = inline(h.text, 0, h.text.length, env);
         parts.push(`<h${h.depth} id="${id}">${html}</h${h.depth}>\n`);
         if (h.depth === 2 || h.depth === 3) toc.push({ level: h.depth, id, html });
-        i++;
+        pos = eol + 1;
         continue;
       }
     }
-    if ((c0 === 45 || c0 === 42) && HR.test(line)) {
+    if ((c0 === 45 || c0 === 42) && isHrRange(src, pos, eol)) {
       parts.push('<hr>\n');
-      i++;
+      pos = eol + 1;
       continue;
     }
     if (c0 === 62) {
       const body = [];
-      while (i < n && lines[i].charCodeAt(0) === 62) {
-        let l = lines[i].slice(1);
-        if (l.charCodeAt(0) === 32) l = l.slice(1);
-        i++;
-        const t = trimLine(l);
-        if (t !== '') body.push(t);
+      while (pos < N && src.charCodeAt(pos) === 62) {
+        let e2 = src.indexOf('\n', pos);
+        if (e2 === -1) e2 = N;
+        let a = pos + 1;
+        if (src.charCodeAt(a) === 32) a++;
+        let b = e2;
+        while (b > a && (src.charCodeAt(b - 1) === 32 || src.charCodeAt(b - 1) === 9)) b--;
+        while (a < b && (src.charCodeAt(a) === 32 || src.charCodeAt(a) === 9)) a++;
+        if (a < b) body.push(src.slice(a, b));
+        pos = e2 + 1;
       }
       if (body.length === 0) parts.push('<blockquote>\n</blockquote>\n');
       else {
@@ -479,26 +538,55 @@ export function renderMarkdown(src, env) {
       }
       continue;
     }
-    let bullet = null;
-    let ordered = null;
-    if ((c0 === 45 || c0 === 42) && line.charCodeAt(1) === 32) bullet = BULLET.exec(line);
-    if (bullet === null && c0 >= 48 && c0 <= 57) ordered = ORDERED.exec(line);
-    if (bullet !== null || ordered !== null) {
-      const isOrdered = ordered !== null;
-      const marker = isOrdered ? ORDERED : BULLET;
+    // List: a bullet (- or * + space) or an ordered marker (1-9 digits + ". ").
+    let isOrdered = false;
+    let start = 1;
+    let firstEnd = -1;
+    if ((c0 === 45 || c0 === 42) && src.charCodeAt(pos + 1) === 32) firstEnd = pos + 2;
+    else if (c0 >= 48 && c0 <= 57) {
+      let j = pos;
+      while (j < eol && src.charCodeAt(j) >= 48 && src.charCodeAt(j) <= 57 && j - pos < 9) j++;
+      if (j > pos && src.charCodeAt(j) === 46 && src.charCodeAt(j + 1) === 32) {
+        isOrdered = true;
+        start = Number(src.slice(pos, j));
+        firstEnd = j + 2;
+      }
+    }
+    if (firstEnd !== -1) {
       const items = [];
-      while (i < n) {
-        const m = marker.exec(lines[i]);
-        if (m !== null) {
-          items.push([trimLine(isOrdered ? m[2] : m[1])]);
-          i++;
-        } else if (CONTINUED.test(lines[i])) {
-          items[items.length - 1].push(trimLine(lines[i]));
-          i++;
-        } else break;
+      while (pos < N) {
+        let e2 = src.indexOf('\n', pos);
+        if (e2 === -1) e2 = N;
+        const d0 = src.charCodeAt(pos);
+        let textStart = -1;
+        if (!isOrdered && (d0 === 45 || d0 === 42) && src.charCodeAt(pos + 1) === 32) textStart = pos + 2;
+        else if (isOrdered && d0 >= 48 && d0 <= 57) {
+          let j = pos;
+          while (j < e2 && src.charCodeAt(j) >= 48 && src.charCodeAt(j) <= 57 && j - pos < 9) j++;
+          if (j > pos && src.charCodeAt(j) === 46 && src.charCodeAt(j + 1) === 32) textStart = j + 2;
+        }
+        if (textStart !== -1) {
+          let a = textStart;
+          let b = e2;
+          while (b > a && (src.charCodeAt(b - 1) === 32 || src.charCodeAt(b - 1) === 9)) b--;
+          while (a < b && (src.charCodeAt(a) === 32 || src.charCodeAt(a) === 9)) a++;
+          items.push([src.slice(a, b)]);
+          pos = e2 + 1;
+        } else {
+          // A continuation: 2+ spaces then a non-space char.
+          let j = pos;
+          while (j < e2 && src.charCodeAt(j) === 32) j++;
+          if (j - pos >= 2 && j < e2 && !isSpaceCode(src.charCodeAt(j))) {
+            let a = pos;
+            let b = e2;
+            while (b > a && (src.charCodeAt(b - 1) === 32 || src.charCodeAt(b - 1) === 9)) b--;
+            while (a < b && (src.charCodeAt(a) === 32 || src.charCodeAt(a) === 9)) a++;
+            items[items.length - 1].push(src.slice(a, b));
+            pos = e2 + 1;
+          } else break;
+        }
       }
       const tag = isOrdered ? 'ol' : 'ul';
-      const start = isOrdered ? Number(ordered[1]) : 1;
       const open = isOrdered && start !== 1 ? `<ol start="${start}">` : `<${tag}>`;
       const lis = [];
       for (const item of items) {
@@ -510,11 +598,26 @@ export function renderMarkdown(src, env) {
       parts.push(`${open}\n${lis.join('')}</${tag}>\n`);
       continue;
     }
-    const body = [trimLine(line)];
-    i++;
-    while (i < n && !endsParagraph(lines[i])) {
-      body.push(trimLine(lines[i]));
-      i++;
+    // Paragraph: the first line plus every following line that does not end it.
+    const body = [];
+    {
+      let a = pos;
+      let b = eol;
+      while (b > a && (src.charCodeAt(b - 1) === 32 || src.charCodeAt(b - 1) === 9)) b--;
+      while (a < b && (src.charCodeAt(a) === 32 || src.charCodeAt(a) === 9)) a++;
+      body.push(src.slice(a, b));
+    }
+    pos = eol + 1;
+    while (pos < N) {
+      let e2 = src.indexOf('\n', pos);
+      if (e2 === -1) e2 = N;
+      if (endsParagraphRange(src, pos, e2)) break;
+      let a = pos;
+      let b = e2;
+      while (b > a && (src.charCodeAt(b - 1) === 32 || src.charCodeAt(b - 1) === 9)) b--;
+      while (a < b && (src.charCodeAt(a) === 32 || src.charCodeAt(a) === 9)) a++;
+      body.push(src.slice(a, b));
+      pos = e2 + 1;
     }
     const joined = body.join('\n');
     if (excerpt === null) {
@@ -712,41 +815,18 @@ function compileTemplate(name, stack, parsed, memo, inProgress) {
   return prog;
 }
 
-/** The value a compiled path instruction reads: its first name from the frame it names (or the root vars), then own properties only. */
-function progValue(ins, frames, rootVars) {
-  const f = ins[1];
-  let v;
-  if (f === -1) {
-    if (!Object.hasOwn(rootVars, ins[2])) return undefined;
-    v = rootVars[ins[2]];
-  } else {
-    v = frames[frames.length - 1 - f][ins[2]];
-  }
-  const segs = ins[3];
-  for (let k = 0; k < segs.length; k++) {
-    if (v === null || typeof v !== 'object' || !Object.hasOwn(v, segs[k])) return undefined;
-    v = v[segs[k]];
-  }
-  return v;
-}
-
-/** An array's items as text, joined by ", " (the reference's textOf for arrays, without the intermediate array). */
+/** An array's items as text, joined by ", " (a string itself, a number in JavaScript's digits, true or false, a nested array the same way, anything else ""). */
 function arrayText(v) {
   let out = '';
   for (let k = 0; k < v.length; k++) {
     if (k > 0) out += ', ';
-    out += valueText(v[k]);
+    const e = v[k];
+    if (typeof e === 'string') out += e;
+    else if (typeof e === 'number') out += String(e);
+    else if (typeof e === 'boolean') out += e ? 'true' : 'false';
+    else if (Array.isArray(e)) out += arrayText(e);
   }
   return out;
-}
-
-/** A value as text: a string itself, a number in JavaScript's digits, true or false, an array's items joined by ", ", else "". */
-function valueText(v) {
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? 'true' : 'false';
-  if (Array.isArray(v)) return arrayText(v);
-  return '';
 }
 
 /**
@@ -764,28 +844,48 @@ export function renderProg(instrs, frames, rootVars, memo, depth, parts) {
       parts.push(ins[1]);
       continue;
     }
-    if (op === 1) {
-      const v = progValue(ins, frames, rootVars);
-      if (typeof v === 'string') parts.push(escapeHtml(v));
-      else if (typeof v === 'number') parts.push(String(v));
-      else if (typeof v === 'boolean') parts.push(v ? 'true' : 'false');
-      else if (Array.isArray(v)) parts.push(escapeHtml(arrayText(v)));
-      continue;
-    }
-    if (op === 2) {
-      parts.push(valueText(progValue(ins, frames, rootVars)));
-      continue;
-    }
-    if (op === 3) {
-      const v = progValue(ins, frames, rootVars);
-      const t = Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null && v !== false && v !== '' && v !== 0;
-      const branch = t !== ins[4] ? ins[5] : ins[6];
-      if (branch !== null) renderProg(branch, frames, rootVars, memo, depth, parts);
-      continue;
-    }
-    if (op === 4) {
-      const xs = progValue(ins, frames, rootVars);
-      if (!Array.isArray(xs)) continue;
+    if (op === 1 || op === 2 || op === 3 || op === 4) {
+      // The value the path reads, inlined (a call per instruction showed up
+      // in the profile under --no-opt): its first name from the frame it
+      // names (or the root vars), then own properties only.
+      const f = ins[1];
+      let v;
+      if (f === -1) {
+        if (!Object.hasOwn(rootVars, ins[2])) v = undefined;
+        else v = rootVars[ins[2]];
+      } else v = frames[frames.length - 1 - f][ins[2]];
+      if (v !== undefined) {
+        const segs = ins[3];
+        for (let q = 0; q < segs.length; q++) {
+          if (v === null || typeof v !== 'object' || !Object.hasOwn(v, segs[q])) {
+            v = undefined;
+            break;
+          }
+          v = v[segs[q]];
+        }
+      }
+      if (op === 1) {
+        if (typeof v === 'string') parts.push(escapeHtml(v));
+        else if (typeof v === 'number') parts.push(String(v));
+        else if (typeof v === 'boolean') parts.push(v ? 'true' : 'false');
+        else if (Array.isArray(v)) parts.push(escapeHtml(arrayText(v)));
+        continue;
+      }
+      if (op === 2) {
+        if (typeof v === 'string') parts.push(v);
+        else if (typeof v === 'number') parts.push(String(v));
+        else if (typeof v === 'boolean') parts.push(v ? 'true' : 'false');
+        else if (Array.isArray(v)) parts.push(arrayText(v));
+        continue;
+      }
+      if (op === 3) {
+        const t = Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null && v !== false && v !== '' && v !== 0;
+        const branch = t !== ins[4] ? ins[5] : ins[6];
+        if (branch !== null) renderProg(branch, frames, rootVars, memo, depth, parts);
+        continue;
+      }
+      if (!Array.isArray(v)) continue;
+      const xs = v;
       const loopVar = ins[4];
       const loop = { index: 1, first: true, last: xs.length === 1, length: xs.length };
       const vars = { loop };
