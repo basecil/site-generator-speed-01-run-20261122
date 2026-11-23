@@ -351,12 +351,12 @@ function findSingleStar(s, from, hi) {
   return -1;
 }
 
-/** The characters that can start an inline construct or need escaping: \ ` * [ & < > " '. One shared regex; every path sets lastIndex before the next exec, so synchronous recursion cannot clobber it. */
+/** The characters that can start an inline construct or need escaping: \ ` * [ & < > " '. One shared regex; every path sets lastIndex before the next test, so synchronous recursion cannot clobber it. `test` (not `exec`): the match is always one character, so its index is lastIndex - 1, and no match array is allocated. */
 const INLINE_SPECIAL = /[\\`*\[&<>"']/g;
 
 /**
  * `s[lo..hi)` rendered inline; `env.link(target)` is a link's href. Bounds-based (no slices for nested constructs):
- * the scanner jumps from one special character to the next with a regex exec, and literal runs are copied verbatim,
+ * the scanner jumps from one special character to the next with a regex test, and literal runs are copied verbatim,
  * so no character is ever passed through a regex escape. Unmatched openers stay in the run, exactly as the reference
  * writes them literally. When `parts` is given, the pieces are pushed into it and nothing is returned (one join at
  * the top level, no nested re-copying); otherwise a local array is joined and returned. (Measured 2026-11-23: 2.3x
@@ -367,9 +367,9 @@ export function inline(s, lo, hi, env, parts) {
   if (own) parts = [];
   let run = lo;
   INLINE_SPECIAL.lastIndex = lo;
-  let m;
-  while ((m = INLINE_SPECIAL.exec(s)) !== null && m.index < hi) {
-    const i = m.index;
+  while (INLINE_SPECIAL.test(s)) {
+    const i = INLINE_SPECIAL.lastIndex - 1;
+    if (i >= hi) break;
     const c = s.charCodeAt(i);
     if (c === 92) {
       // Backslash: an escapable next char is written (escaped); anything else
